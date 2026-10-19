@@ -276,5 +276,24 @@ if (typeof globalThis.AudioContext === 'undefined') {
   globalThis.AudioContext = MockAudioContext as unknown as typeof AudioContext;
   (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext =
     MockAudioContext as unknown as typeof AudioContext;
+
+  class MockOfflineAudioContext extends MockAudioContext {
+    public length: number;
+    constructor(_numberOfChannels: number, length: number, sampleRate: number) {
+      super();
+      this.length = length;
+      this.sampleRate = sampleRate;
+    }
+
+    async startRendering(): Promise<MockAudioBuffer> {
+      return new MockAudioBuffer({
+        numberOfChannels: 1,
+        length: this.length,
+        sampleRate: this.sampleRate,
+      });
+    }
+  }
+
+  globalThis.OfflineAudioContext = MockOfflineAudioContext as unknown as typeof OfflineAudioContext;
 }
 

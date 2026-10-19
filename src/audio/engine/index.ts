@@ -235,6 +235,86 @@ export class Deck {
   }
 
   /**
+   * Starts playback scheduled on the audio clock at a precise future audio time.
+   */
+  public startAtTime(audioClockTime: number, offsetSec = 0, initialRate = 1.0): void {
+    if (!this.buffer) return;
+    this.cleanupSource();
+    const source = this.ctx.createBufferSource();
+    source.buffer = this.buffer;
+    this.playbackRate = initialRate;
+    source.playbackRate.setValueAtTime(initialRate, audioClockTime);
+    source.connect(this.trackGain);
+
+    source.onended = () => {
+      if (this.playbackState === 'playing') {
+        this.playbackState = 'stopped';
+        this.pausedOffsetSec = 0;
+      }
+    };
+
+    source.start(audioClockTime, offsetSec);
+    this.sourceNode = source;
+    this.startedAtAudioTime = audioClockTime;
+    this.pausedOffsetSec = offsetSec;
+    this.playbackState = 'playing';
+  }
+
+  /**
+   * Stops playback scheduled at a precise future audio clock time.
+   */
+  public stopAtTime(audioClockTime: number): void {
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.stop(audioClockTime);
+      } catch {
+        // Ignore if already stopped
+      }
+    }
+  }
+
+  /**
+   * Ramps playback rate smoothly toward target rate over durationSec.
+   */
+  public rampPlaybackRate(targetRate: number, durationSec: number, startTime?: number): void {
+    if (!this.sourceNode) return;
+    const now = startTime ?? this.ctx.currentTime;
+    this.sourceNode.playbackRate.cancelScheduledValues(now);
+    this.sourceNode.playbackRate.setValueAtTime(this.sourceNode.playbackRate.value, now);
+    this.sourceNode.playbackRate.linearRampToValueAtTime(targetRate, now + durationSec);
+    this.playbackRate = targetRate;
+  }
+
+  /**
+   * Sets track normalization gain with click-free linear ramp.
+   */
+  public setTrackGain(gain: number, rampDurationSec = 0.02): void {
+    const clamped = Math.max(0, Math.min(4.0, gain));
+    const now = this.ctx.currentTime;
+    this.trackGain.gain.cancelScheduledValues(now);
+    this.trackGain.gain.setValueAtTime(this.trackGain.gain.value, now);
+    this.trackGain.gain.linearRampToValueAtTime(clamped, now + Math.max(0.005, rampDurationSec));
+  }
+
+  /**
+   * Releases loaded buffer to enforce memory limit (max 2 decoded buffers).
+   */
+  public unloadBuffer(): void {
+    this.stop();
+    this.buffer = null;
+    this.trackId = null;
+    this.playbackState = 'idle';
+  }
+
+  public get hasBuffer(): boolean {
+    return this.buffer !== null;
+  }
+
+  public get rate(): number {
+    return this.playbackRate;
+  }
+
+  /**
    * Destroys deck, disconnects all nodes, and releases buffer to prevent memory leaks.
    */
   public destroy(): void {
@@ -303,6 +383,32 @@ export class TwoDeckMixer {
   }
 
   /**
+   * Schedules an equal-power crossfade ahead on the audio clock starting at startAudioTime.
+   */
+  public scheduleCrossfade(
+    fromDeck: DeckId,
+    startAudioTime: number,
+    durationSec = 4.0
+  ): void {
+    const dur = Math.max(0.1, durationSec);
+    const steps = 64;
+    const stepDuration = dur / steps;
+
+    this.deckA.deckGain.gain.cancelScheduledValues(startAudioTime);
+    this.deckB.deckGain.gain.cancelScheduledValues(startAudioTime);
+
+    for (let i = 0; i <= steps; i++) {
+      const progress = i / steps;
+      const t = fromDeck === 'A' ? progress : 1 - progress;
+      const { gainA, gainB } = equalPowerGains(t);
+      const targetTime = startAudioTime + i * stepDuration;
+
+      this.deckA.deckGain.gain.linearRampToValueAtTime(gainA, targetTime);
+      this.deckB.deckGain.gain.linearRampToValueAtTime(gainB, targetTime);
+    }
+  }
+
+  /**
    * Set master volume with smooth click-free ramp.
    */
   public setMasterVolume(value: number, rampDurationSec = 0.02): void {
@@ -339,3 +445,5 @@ export function getTwoDeckMixer(): TwoDeckMixer {
 
 // Backward-compatible AudioEngine alias
 export const AudioEngine = TwoDeckMixer;
+
+export * from './autoMix';
