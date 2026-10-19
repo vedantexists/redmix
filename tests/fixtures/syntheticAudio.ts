@@ -24,6 +24,10 @@ export function generateSyntheticClickTrack(
     clickDurationSec = 0.02,
   } = options;
 
+  if (bpm <= 0 || durationSec <= 0) {
+    return new Float32Array(0);
+  }
+
   const totalSamples = Math.floor(durationSec * sampleRate);
   const pcm = new Float32Array(totalSamples);
   const beatIntervalSec = 60 / bpm;
