@@ -139,3 +139,142 @@ if (typeof globalThis.indexedDB === 'undefined') {
     },
   } as unknown as IDBFactory;
 }
+
+// Lightweight Web Audio API polyfill for jsdom unit testing
+if (typeof globalThis.AudioContext === 'undefined') {
+  class MockAudioParam {
+    public value: number;
+    public scheduledEvents: { type: string; value: number; time: number }[] = [];
+
+    constructor(initialValue = 1.0) {
+      this.value = initialValue;
+    }
+
+    cancelScheduledValues(time: number) {
+      this.scheduledEvents = this.scheduledEvents.filter((e) => e.time < time);
+    }
+
+    setValueAtTime(value: number, time: number) {
+      this.value = value;
+      this.scheduledEvents.push({ type: 'set', value, time });
+    }
+
+    linearRampToValueAtTime(value: number, time: number) {
+      this.value = value;
+      this.scheduledEvents.push({ type: 'linear', value, time });
+    }
+
+    exponentialRampToValueAtTime(value: number, time: number) {
+      this.value = value;
+      this.scheduledEvents.push({ type: 'exponential', value, time });
+    }
+  }
+
+  class MockAudioNode {
+    public connections: MockAudioNode[] = [];
+
+    connect(destination: MockAudioNode) {
+      this.connections.push(destination);
+      return destination;
+    }
+
+    disconnect() {
+      this.connections = [];
+    }
+  }
+
+  class MockGainNode extends MockAudioNode {
+    public gain = new MockAudioParam(1.0);
+  }
+
+  class MockBiquadFilterNode extends MockAudioNode {
+    public type = 'lowpass';
+    public frequency = new MockAudioParam(350);
+    public Q = new MockAudioParam(1);
+    public gain = new MockAudioParam(0);
+  }
+
+  class MockAudioBufferSourceNode extends MockAudioNode {
+    public buffer: MockAudioBuffer | null = null;
+    public playbackRate = new MockAudioParam(1.0);
+    public onended: (() => void) | null = null;
+    public started = false;
+    public stopped = false;
+
+    start(_when?: number, _offset?: number) {
+      this.started = true;
+    }
+
+    stop(_when?: number) {
+      this.stopped = true;
+      this.onended?.();
+    }
+  }
+
+  class MockAudioBuffer {
+    public numberOfChannels: number;
+    public length: number;
+    public sampleRate: number;
+    public duration: number;
+    private channels: Float32Array[];
+
+    constructor(options: { numberOfChannels: number; length: number; sampleRate: number }) {
+      this.numberOfChannels = options.numberOfChannels;
+      this.length = options.length;
+      this.sampleRate = options.sampleRate;
+      this.duration = options.length / options.sampleRate;
+      this.channels = Array.from(
+        { length: this.numberOfChannels },
+        () => new Float32Array(this.length)
+      );
+    }
+
+    getChannelData(channel: number) {
+      return this.channels[channel] || new Float32Array(this.length);
+    }
+  }
+
+  class MockAudioContext {
+    public state: AudioContextState = 'running';
+    public sampleRate = 44100;
+    public currentTime = 0;
+    public destination = new MockAudioNode();
+
+    createGain() {
+      return new MockGainNode();
+    }
+
+    createBiquadFilter() {
+      return new MockBiquadFilterNode();
+    }
+
+    createBufferSource() {
+      return new MockAudioBufferSourceNode();
+    }
+
+    createBuffer(numberOfChannels: number, length: number, sampleRate: number) {
+      return new MockAudioBuffer({ numberOfChannels, length, sampleRate });
+    }
+
+    async resume() {
+      this.state = 'running';
+    }
+
+    async suspend() {
+      this.state = 'suspended';
+    }
+
+    async decodeAudioData(arrayBuffer: ArrayBuffer) {
+      return new MockAudioBuffer({
+        numberOfChannels: 2,
+        length: Math.max(1024, arrayBuffer.byteLength),
+        sampleRate: 44100,
+      });
+    }
+  }
+
+  globalThis.AudioContext = MockAudioContext as unknown as typeof AudioContext;
+  (globalThis as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext =
+    MockAudioContext as unknown as typeof AudioContext;
+}
+

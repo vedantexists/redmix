@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store';
 import {
   isFileSystemAccessSupported,
@@ -7,6 +7,7 @@ import {
 } from '@/library/fileAccess';
 import { importAudioFiles, type ImportFailure } from '@/library/importer';
 import type { Track } from '@/shared/types';
+import { getTwoDeckMixer } from '@/audio/engine';
 
 export const LibraryScreen: React.FC = () => {
   const { tracks, addTracks, removeTrack } = useAppStore();
@@ -318,14 +319,243 @@ export const PlaylistScreen: React.FC = () => (
   </div>
 );
 
-export const NowMixingScreen: React.FC = () => (
-  <div data-testid="screen-now-mixing" className="p-4">
-    <h2 className="text-xl font-bold text-white mb-2">Now Mixing</h2>
-    <p className="text-gray-400 text-sm">
-      Live dual-deck playback and transition monitoring.
-    </p>
-  </div>
-);
+export const NowMixingScreen: React.FC = () => {
+  const [crossfadeSec, setCrossfadeSec] = useState(4);
+  const [activeDeck, setActiveDeck] = useState<'A' | 'B'>('A');
+  const [deckAStatus, setDeckAStatus] = useState<string>('idle');
+  const [deckBStatus, setDeckBStatus] = useState<string>('idle');
+  const [deckAPos, setDeckAPos] = useState(0);
+  const [deckBPos, setDeckBPos] = useState(0);
+  const [deckADur, setDeckADur] = useState(0);
+  const [deckBDur, setDeckBDur] = useState(0);
+
+  const getMixer = () => {
+    try {
+      return getTwoDeckMixer();
+    } catch {
+      return null;
+    }
+  };
+
+  // Sync positions periodically for display
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const mixer = getMixer();
+      if (mixer) {
+        setDeckAPos(mixer.deckA.getCurrentTime());
+        setDeckBPos(mixer.deckB.getCurrentTime());
+        setDeckADur(mixer.deckA.duration);
+        setDeckBDur(mixer.deckB.duration);
+        setDeckAStatus(mixer.deckA.state);
+        setDeckBStatus(mixer.deckB.state);
+      }
+    }, 200);
+    return () => clearInterval(timer);
+  }, []);
+
+  const handleLoadDemoDecks = async () => {
+    const mixer = getMixer();
+    if (!mixer) return;
+
+    // Create 10-second synthetic audio buffers for Deck A (440Hz) and Deck B (880Hz)
+    const ctx = mixer.context;
+    const dur = 10;
+    const sampleRate = ctx.sampleRate;
+
+    const bufA = ctx.createBuffer(1, sampleRate * dur, sampleRate);
+    const dataA = bufA.getChannelData(0);
+    for (let i = 0; i < dataA.length; i++) {
+      dataA[i] = Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 0.4;
+    }
+
+    const bufB = ctx.createBuffer(1, sampleRate * dur, sampleRate);
+    const dataB = bufB.getChannelData(0);
+    for (let i = 0; i < dataB.length; i++) {
+      dataB[i] = Math.sin((2 * Math.PI * 880 * i) / sampleRate) * 0.4;
+    }
+
+    mixer.deckA.loadBuffer(bufA, 'demo-track-a');
+    mixer.deckB.loadBuffer(bufB, 'demo-track-b');
+    setDeckADur(dur);
+    setDeckBDur(dur);
+    setDeckAStatus('ready');
+    setDeckBStatus('ready');
+  };
+
+  const handlePlayDeck = async (deckId: 'A' | 'B') => {
+    const mixer = getMixer();
+    if (!mixer) return;
+    const deck = deckId === 'A' ? mixer.deckA : mixer.deckB;
+    if (deck.state === 'playing') {
+      deck.pause();
+    } else {
+      await deck.play();
+    }
+  };
+
+  const handleSeek = (deckId: 'A' | 'B', sec: number) => {
+    const mixer = getMixer();
+    if (!mixer) return;
+    const deck = deckId === 'A' ? mixer.deckA : mixer.deckB;
+    deck.seek(sec);
+  };
+
+  const handleCrossfade = () => {
+    const mixer = getMixer();
+    if (!mixer) return;
+    const nextDeck = activeDeck === 'A' ? 'B' : 'A';
+    mixer.crossfade(activeDeck, crossfadeSec);
+    setActiveDeck(nextDeck);
+  };
+
+  return (
+    <div data-testid="screen-now-mixing" className="p-4 space-y-4">
+      {/* Title & Setup */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-white tracking-wide">Now Mixing</h2>
+          <p className="text-gray-400 text-xs">Equal-power dual-deck playback engine</p>
+        </div>
+        <button
+          data-testid="btn-load-demo-decks"
+          onClick={handleLoadDemoDecks}
+          className="px-3 py-1.5 rounded-xl bg-gray-800 hover:bg-gray-700 text-xs text-indigo-300 font-medium border border-gray-700/60"
+        >
+          Load Demo Decks
+        </button>
+      </div>
+
+      {/* Dual Decks Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {/* Deck A */}
+        <div
+          data-testid="deck-a-card"
+          className={`p-4 rounded-2xl bg-gray-900/80 border transition-all ${
+            activeDeck === 'A' ? 'border-indigo-500/50 shadow-lg shadow-indigo-500/10' : 'border-gray-800'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs uppercase font-bold tracking-wider text-indigo-400">
+              Deck A {activeDeck === 'A' ? '(Live)' : ''}
+            </span>
+            <span
+              data-testid="deck-a-status"
+              className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 font-mono"
+            >
+              {deckAStatus}
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex justify-between text-xs text-gray-400 font-mono">
+              <span>{deckAPos.toFixed(1)}s</span>
+              <span>{deckADur.toFixed(1)}s</span>
+            </div>
+
+            <input
+              type="range"
+              data-testid="deck-a-seek"
+              min="0"
+              max={deckADur || 10}
+              step="0.1"
+              value={deckAPos}
+              onChange={(e) => handleSeek('A', parseFloat(e.target.value))}
+              className="w-full accent-indigo-500 bg-gray-800 h-1.5 rounded-lg cursor-pointer"
+            />
+
+            <div className="flex gap-2">
+              <button
+                data-testid="btn-play-deck-a"
+                onClick={() => handlePlayDeck('A')}
+                className="flex-1 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md active:scale-95"
+              >
+                {deckAStatus === 'playing' ? 'Pause Deck A' : 'Play Deck A'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Deck B */}
+        <div
+          data-testid="deck-b-card"
+          className={`p-4 rounded-2xl bg-gray-900/80 border transition-all ${
+            activeDeck === 'B' ? 'border-purple-500/50 shadow-lg shadow-purple-500/10' : 'border-gray-800'
+          }`}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs uppercase font-bold tracking-wider text-purple-400">
+              Deck B {activeDeck === 'B' ? '(Live)' : ''}
+            </span>
+            <span
+              data-testid="deck-b-status"
+              className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-300 font-mono"
+            >
+              {deckBStatus}
+            </span>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex justify-between text-xs text-gray-400 font-mono">
+              <span>{deckBPos.toFixed(1)}s</span>
+              <span>{deckBDur.toFixed(1)}s</span>
+            </div>
+
+            <input
+              type="range"
+              data-testid="deck-b-seek"
+              min="0"
+              max={deckBDur || 10}
+              step="0.1"
+              value={deckBPos}
+              onChange={(e) => handleSeek('B', parseFloat(e.target.value))}
+              className="w-full accent-purple-500 bg-gray-800 h-1.5 rounded-lg cursor-pointer"
+            />
+
+            <div className="flex gap-2">
+              <button
+                data-testid="btn-play-deck-b"
+                onClick={() => handlePlayDeck('B')}
+                className="flex-1 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold shadow-md active:scale-95"
+              >
+                {deckBStatus === 'playing' ? 'Pause Deck B' : 'Play Deck B'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Crossfader Section */}
+      <div className="p-4 rounded-2xl bg-gradient-to-b from-gray-900 to-gray-950 border border-gray-800 space-y-3">
+        <div className="flex items-center justify-between text-xs">
+          <span className="font-semibold text-gray-300">Equal-Power Crossfader</span>
+          <div className="flex items-center gap-1.5">
+            {[2, 4, 8, 16].map((sec) => (
+              <button
+                key={sec}
+                onClick={() => setCrossfadeSec(sec)}
+                className={`px-2 py-0.5 rounded-lg font-mono text-[11px] ${
+                  crossfadeSec === sec
+                    ? 'bg-indigo-600 text-white font-bold'
+                    : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {sec}s
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          data-testid="btn-trigger-crossfade"
+          onClick={handleCrossfade}
+          className="w-full py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/20 active:scale-98 transition-all"
+        >
+          Crossfade to Deck {activeDeck === 'A' ? 'B' : 'A'} ({crossfadeSec}s Equal Power)
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const TrackEditorScreen: React.FC = () => (
   <div data-testid="screen-track-editor" className="p-4">
