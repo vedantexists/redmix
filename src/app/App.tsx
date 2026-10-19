@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Header } from './components';
+import { useAppStore } from './store';
 import {
   LibraryScreen,
   PlaylistScreen,
@@ -12,6 +13,11 @@ type Tab = 'mixing' | 'library' | 'playlist' | 'editor' | 'settings';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>('mixing');
+  const loadTracksFromDb = useAppStore((s) => s.loadTracksFromDb);
+
+  useEffect(() => {
+    loadTracksFromDb();
+  }, [loadTracksFromDb]);
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto sm:max-w-xl md:max-w-4xl bg-[#0B0F19] text-gray-100 shadow-2xl border-x border-gray-800/60 overflow-hidden">
