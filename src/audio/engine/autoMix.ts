@@ -46,7 +46,10 @@ export class AutoMixEngine {
 
   private isRunning = false;
   private isTransitioning = false;
+  private isEndingFadeOut = false;
   private transitionEndTime: number | null = null;
+  private transitionRemainingSec: number | null = null;
+  private transitionElapsedSec: number | null = null;
   private currentPlan: TransitionPlan | null = null;
   private isPredecoding = false;
 
@@ -56,16 +59,17 @@ export class AutoMixEngine {
   constructor(options?: {
     mixer?: TwoDeckMixer;
     bufferLoader?: BufferLoader;
-    settings?: Settings;
+    settings?: Partial<Settings>;
   }) {
     this.mixer = options?.mixer || getTwoDeckMixer();
     this.bufferLoader = options?.bufferLoader || defaultBufferLoader;
-    this.settings = options?.settings || {
+    this.settings = {
       mixBars: 16,
       transitionStyle: 'bassSwap',
       maxTempoStretchPct: 6,
       keyAwareOrdering: true,
       targetLoudnessDb: -14,
+      ...options?.settings,
     };
   }
 
@@ -132,9 +136,33 @@ export class AutoMixEngine {
     this.isRunning = true;
 
     if (this.activeDeck.state === 'paused') {
+      const resumeAudioTime = this.mixer.context.currentTime;
       await this.activeDeck.play();
       if (this.isTransitioning) {
         await this.incomingDeck.play();
+
+        // Reschedule transition timing if paused during transition
+        if (this.transitionRemainingSec !== null && this.currentPlan) {
+          const plan = this.currentPlan;
+          const remaining = this.transitionRemainingSec;
+          const elapsed = this.transitionElapsedSec ?? Math.max(0, plan.durationSec - remaining);
+          const total = plan.durationSec;
+
+          if (plan.rateRamp === 'toNeutral') {
+            this.incomingDeck.rampPlaybackRate(1.0, remaining, resumeAudioTime);
+          }
+
+          this.mixer.schedulePartialCrossfade(
+            this.activeDeckId,
+            resumeAudioTime,
+            total,
+            elapsed
+          );
+
+          this.transitionEndTime = resumeAudioTime + remaining;
+          this.transitionRemainingSec = null;
+          this.transitionElapsedSec = null;
+        }
       }
     } else {
       await this.loadAndPlayCurrent();
@@ -149,6 +177,13 @@ export class AutoMixEngine {
     this.isRunning = false;
     this.stopLookahead();
 
+    if (this.isTransitioning && this.transitionEndTime !== null && this.currentPlan) {
+      const now = this.mixer.context.currentTime;
+      const remaining = Math.max(0.01, this.transitionEndTime - now);
+      this.transitionRemainingSec = remaining;
+      this.transitionElapsedSec = Math.max(0, this.currentPlan.durationSec - remaining);
+    }
+
     this.activeDeck.pause();
     if (this.isTransitioning) {
       this.incomingDeck.pause();
@@ -159,7 +194,10 @@ export class AutoMixEngine {
   public stop(): void {
     this.isRunning = false;
     this.isTransitioning = false;
+    this.isEndingFadeOut = false;
     this.transitionEndTime = null;
+    this.transitionRemainingSec = null;
+    this.transitionElapsedSec = null;
     this.currentPlan = null;
     this.stopLookahead();
 
@@ -184,7 +222,10 @@ export class AutoMixEngine {
       this.activeDeckId = this.activeDeckId === 'A' ? 'B' : 'A';
       this.currentIndex++;
       this.isTransitioning = false;
+      this.isEndingFadeOut = false;
       this.transitionEndTime = null;
+      this.transitionRemainingSec = null;
+      this.transitionElapsedSec = null;
       this.currentPlan = null;
 
       this.emit({ type: 'track_changed', track: this.getCurrentTrack() });
@@ -319,10 +360,25 @@ export class AutoMixEngine {
     // 4. Handle end of playlist (single track or last track)
     if (!nextTrack && !this.isTransitioning) {
       const currentPos = active.getCurrentTime();
-      if (currentPos >= active.duration - 0.2) {
+      const remaining = active.duration - currentPos;
+      const fadeDuration = Math.min(2.0, Math.max(0.5, active.duration * 0.2));
+
+      if (remaining <= fadeDuration && !this.isEndingFadeOut && remaining > 0) {
+        this.isEndingFadeOut = true;
+        active.setGain(0, remaining);
+      }
+
+      if (currentPos >= active.duration - 0.05) {
         this.stop();
       }
     }
+  }
+
+  /**
+   * Manually executes one lookahead tick (primarily for testing and deterministic sync).
+   */
+  public async tick(): Promise<void> {
+    await this.lookaheadTick();
   }
 
   private scheduleTransition(
@@ -369,7 +425,10 @@ export class AutoMixEngine {
     this.activeDeckId = this.activeDeckId === 'A' ? 'B' : 'A';
     this.currentIndex++;
     this.isTransitioning = false;
+    this.isEndingFadeOut = false;
     this.transitionEndTime = null;
+    this.transitionRemainingSec = null;
+    this.transitionElapsedSec = null;
     this.currentPlan = null;
 
     const newCurrent = this.getCurrentTrack();

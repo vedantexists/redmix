@@ -1,14 +1,24 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { generateSyntheticClickTrack } from '../fixtures/syntheticAudio';
 import { equalPowerGains } from '@/shared/math';
+import { planTransition } from '@/audio/planner';
 import { AutoMixEngine } from '@/audio/engine/autoMix';
-import { TwoDeckMixer } from '@/audio/engine';
+import { TwoDeckMixer, AudioContextManager } from '@/audio/engine';
 import type { Track, TrackAnalysis } from '@/shared/types';
 
 describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
   const sampleRate = 44100;
 
-  function createTestTrack(id: string, bpm: number, durationSec = 16): Track {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    (AudioContextManager.getInstance().getContext() as unknown as { currentTime: number }).currentTime = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createTestTrack(id: string, bpm: number, durationSec = 60, outroStartSec?: number): Track {
     const barSec = 4 * (60 / bpm);
     const analysis: TrackAnalysis = {
       bpm,
@@ -17,8 +27,8 @@ describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
       beatsPerBar: 4,
       key: { camelot: '8A', confidence: 0.9 },
       durationSec,
-      introEndSec: barSec,
-      outroStartSec: durationSec - barSec * 2,
+      introEndSec: barSec * 2,
+      outroStartSec: outroStartSec ?? (durationSec - barSec * 8),
       barEnergy: [0.1, 0.2, 0.2, 0.1],
       loudnessGainDb: 0,
       analysisVersion: 1,
@@ -35,6 +45,14 @@ describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
   }
 
   describe('Offline Render Test (Equal-Power & Beat Alignment)', () => {
+    /**
+     * In jsdom test environment, OfflineAudioContext does not execute real-time hardware DSP.
+     * We analytically simulate the exact Web Audio graph equal-power crossfade math
+     * on synthetic click track PCM samples to verify:
+     * 1. No clipping (peak < 1.0)
+     * 2. No silence gap (RMS > 0.01)
+     * 3. Kick onset alignment within <= 2.5 ms
+     */
     it('renders transition with kick alignment within 3ms, no clipping (peak < 1.0), and no silence gap', () => {
       const bpm = 124;
       const beatInterval = 60 / bpm; // ~0.48387s
@@ -146,36 +164,94 @@ describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
       }
     });
 
-    it('verifies incoming track beat 1 lands on a bar line of outgoing track for two different BPM pairs', () => {
-      // Pair 1: 120 BPM and 124 BPM
-      const bpm1 = 120;
-      const barSec1 = 4 * (60 / bpm1);
-      const mixStart1 = 2 * barSec1;
-      // Pair 1 start is at an exact bar line of 120 BPM
-      expect(mixStart1 % barSec1).toBeCloseTo(0, 5);
+    it('verifies incoming track beat 1 lands on a bar line of outgoing track for two different BPM pairs with non-zero offsets', () => {
+      // Pair 1: 120 BPM (offset 0.35s) and 124 BPM (offset 0.22s)
+      const analysisA: TrackAnalysis = {
+        bpm: 120,
+        bpmConfidence: 0.95,
+        firstBeatSec: 0.35,
+        beatsPerBar: 4,
+        key: { camelot: '8A', confidence: 0.9 },
+        durationSec: 60,
+        introEndSec: 8,
+        outroStartSec: 45,
+        barEnergy: [0.1, 0.2, 0.2, 0.1],
+        loudnessGainDb: 0,
+        analysisVersion: 1,
+      };
 
-      // Pair 2: 128 BPM and 130 BPM
-      const bpm2 = 128;
-      const barSec2 = 4 * (60 / bpm2);
-      const mixStart2 = 3 * barSec2;
-      expect(mixStart2 % barSec2).toBeCloseTo(0, 5);
+      const analysisB: TrackAnalysis = {
+        bpm: 124,
+        bpmConfidence: 0.95,
+        firstBeatSec: 0.22,
+        beatsPerBar: 4,
+        key: { camelot: '8B', confidence: 0.9 },
+        durationSec: 60,
+        introEndSec: 8,
+        outroStartSec: 45,
+        barEnergy: [0.1, 0.2, 0.2, 0.1],
+        loudnessGainDb: 0,
+        analysisVersion: 1,
+      };
+
+      const plan1 = planTransition(analysisA, analysisB, { mixBars: 8 });
+      const barSecA = 4 * (60 / analysisA.bpm);
+      // Assert outgoingStartSec is aligned to track A's bar grid (firstBeatSec + k * barSecA)
+      const barsFromFirstBeat1 = (plan1.outgoingStartSec - analysisA.firstBeatSec) / barSecA;
+      expect(Math.abs(Math.round(barsFromFirstBeat1) - barsFromFirstBeat1)).toBeLessThan(0.005);
+      // Assert incomingStartSec is at track B's first beat
+      expect(plan1.incomingStartSec).toBe(analysisB.firstBeatSec);
+
+      // Pair 2: 128 BPM (offset 0.48s) and 130 BPM (offset 0.15s)
+      const analysisC: TrackAnalysis = {
+        bpm: 128,
+        bpmConfidence: 0.92,
+        firstBeatSec: 0.48,
+        beatsPerBar: 4,
+        key: { camelot: '11B', confidence: 0.9 },
+        durationSec: 90,
+        introEndSec: 10,
+        outroStartSec: 75,
+        barEnergy: [0.2, 0.3, 0.3, 0.2],
+        loudnessGainDb: -1.2,
+        analysisVersion: 1,
+      };
+
+      const analysisD: TrackAnalysis = {
+        bpm: 130,
+        bpmConfidence: 0.91,
+        firstBeatSec: 0.15,
+        beatsPerBar: 4,
+        key: { camelot: '12B', confidence: 0.9 },
+        durationSec: 90,
+        introEndSec: 10,
+        outroStartSec: 75,
+        barEnergy: [0.2, 0.3, 0.3, 0.2],
+        loudnessGainDb: 0.8,
+        analysisVersion: 1,
+      };
+
+      const plan2 = planTransition(analysisC, analysisD, { mixBars: 16 });
+      const barSecC = 4 * (60 / analysisC.bpm);
+      const barsFromFirstBeat2 = (plan2.outgoingStartSec - analysisC.firstBeatSec) / barSecC;
+      expect(Math.abs(Math.round(barsFromFirstBeat2) - barsFromFirstBeat2)).toBeLessThan(0.005);
+      expect(plan2.incomingStartSec).toBe(analysisD.firstBeatSec);
     });
   });
 
   describe('3-Track Playlist Auto-Mix Execution', () => {
     it('plays 3-track playlist end to end through two automatic transitions with buffer bounds', async () => {
-      const mixer = new TwoDeckMixer();
+      const ctx = new AudioContext();
+      const mixer = new TwoDeckMixer(ctx);
       const mockBuffers = new Map<string, AudioBuffer>();
 
-      const t1 = createTestTrack('track-1', 120, 10);
-      const t2 = createTestTrack('track-2', 120, 10);
-      const t3 = createTestTrack('track-3', 120, 10);
+      // 60-second tracks, mixBars: 8 (16.0s duration), outro starts at 40.0s -> mix start at 40.0s
+      const t1 = createTestTrack('track-1', 120, 60, 40);
+      const t2 = createTestTrack('track-2', 120, 60, 40);
+      const t3 = createTestTrack('track-3', 120, 60, 40);
 
-      // Pre-create mock buffers
       for (const track of [t1, t2, t3]) {
-        const pcm = generateSyntheticClickTrack({ bpm: 120, durationSec: 10 });
-        const buf = mixer.context.createBuffer(1, pcm.length, sampleRate);
-        buf.getChannelData(0).set(pcm);
+        const buf = mixer.context.createBuffer(1, sampleRate * 60, sampleRate);
         mockBuffers.set(track.id, buf);
       }
 
@@ -210,21 +286,52 @@ describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
       await engine.play();
       expect(engine.isPlaying).toBe(true);
 
+      // Pre-decode next track on tick
+      await engine.tick();
+
       // Memory target check: at most current and next buffer loaded
       let loadedBuffers = (mixer.deckA.hasBuffer ? 1 : 0) + (mixer.deckB.hasBuffer ? 1 : 0);
       expect(loadedBuffers).toBeLessThanOrEqual(2);
 
-      // Advance with skip (transition 1: t1 -> t2)
-      engine.skip();
-      expect(engine.getCurrentTrack()?.id).toBe('track-2');
+      // Advance time automatically towards transition 1 (mix start at 40.0s; lookahead schedules at 39.2s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 39.2;
+      await engine.tick();
+      expect(engine.inTransition).toBe(true);
+      expect(transitionEvents).toEqual(['started']);
 
       loadedBuffers = (mixer.deckA.hasBuffer ? 1 : 0) + (mixer.deckB.hasBuffer ? 1 : 0);
       expect(loadedBuffers).toBeLessThanOrEqual(2);
 
-      // Advance with skip (transition 2: t2 -> t3)
-      engine.skip();
+      // Advance time past transition 1 end (40.0s + 16.0s = 56.0s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 56.05;
+      await engine.tick();
+      expect(engine.inTransition).toBe(false);
+      expect(transitionEvents).toEqual(['started', 'completed']);
+      expect(engine.getCurrentTrack()?.id).toBe('track-2');
+
+      // Previous track buffer is unloaded; at most 2 buffers loaded
+      loadedBuffers = (mixer.deckA.hasBuffer ? 1 : 0) + (mixer.deckB.hasBuffer ? 1 : 0);
+      expect(loadedBuffers).toBeLessThanOrEqual(2);
+
+      // Advance time so track 3 is predecoded for transition 2
+      await engine.tick();
+      loadedBuffers = (mixer.deckA.hasBuffer ? 1 : 0) + (mixer.deckB.hasBuffer ? 1 : 0);
+      expect(loadedBuffers).toBeLessThanOrEqual(2);
+
+      // Advance time to transition 2 mix start (track-2 started at 40.0s, outgoingStartSec is 40.0s -> 79.2s lookahead)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 79.2;
+      await engine.tick();
+      expect(engine.inTransition).toBe(true);
+      expect(transitionEvents).toEqual(['started', 'completed', 'started']);
+
+      // Advance time past transition 2 end (80.0s + 16.0s = 96.0s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 96.05;
+      await engine.tick();
+      expect(engine.inTransition).toBe(false);
+      expect(transitionEvents).toEqual(['started', 'completed', 'started', 'completed']);
       expect(engine.getCurrentTrack()?.id).toBe('track-3');
 
+      // Final memory target check
       loadedBuffers = (mixer.deckA.hasBuffer ? 1 : 0) + (mixer.deckB.hasBuffer ? 1 : 0);
       expect(loadedBuffers).toBeLessThanOrEqual(2);
 
@@ -232,82 +339,160 @@ describe('Milestone M5: Auto-Mix Execution & Offline Render', () => {
     });
 
     it('handles edge case: skip mid-transition cleanly cuts to incoming track', async () => {
-      const mixer = new TwoDeckMixer();
-      const t1 = createTestTrack('t-a', 124, 10);
-      const t2 = createTestTrack('t-b', 124, 10);
+      const ctx = new AudioContext();
+      const mixer = new TwoDeckMixer(ctx);
+      const t1 = createTestTrack('t-a', 120, 60, 40);
+      const t2 = createTestTrack('t-b', 120, 60, 40);
 
       const bufferLoader = async (): Promise<AudioBuffer> => {
-        return mixer.context.createBuffer(1, 44100 * 10, 44100);
+        return mixer.context.createBuffer(1, 44100 * 60, 44100);
       };
 
-      const engine = new AutoMixEngine({ mixer, bufferLoader });
+      const engine = new AutoMixEngine({
+        mixer,
+        bufferLoader,
+        settings: { mixBars: 8, transitionStyle: 'bassSwap' },
+      });
       engine.setPlaylist([t1, t2]);
 
       await engine.play();
       expect(engine.getCurrentTrack()?.id).toBe('t-a');
 
-      // Trigger skip
+      // Pre-decode next track into incoming deck
+      await engine.tick();
+
+      // Advance time so transition is actively scheduled and started (mix start at 40.0s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 39.2;
+      await engine.tick();
+      expect(engine.inTransition).toBe(true);
+
+      // Advance into active transition duration
+      (mixer.context as unknown as { currentTime: number }).currentTime = 45.0;
+
+      // Trigger mid-transition skip
       engine.skip();
-      expect(engine.getCurrentTrack()?.id).toBe('t-b');
       expect(engine.inTransition).toBe(false);
+      expect(engine.getCurrentTrack()?.id).toBe('t-b');
+      expect(engine.activeDeck.trackId).toBe('t-b');
 
       engine.destroy();
     });
 
-    it('handles edge case: pause during playback and resume', async () => {
-      const mixer = new TwoDeckMixer();
-      const t1 = createTestTrack('t-pause', 120, 10);
+    it('handles edge case: pause during transition and resume without premature completion', async () => {
+      const ctx = new AudioContext();
+      const mixer = new TwoDeckMixer(ctx);
+      const t1 = createTestTrack('t-pause-1', 120, 60, 40);
+      const t2 = createTestTrack('t-pause-2', 120, 60, 40);
 
       const bufferLoader = async (): Promise<AudioBuffer> => {
-        return mixer.context.createBuffer(1, 44100 * 10, 44100);
+        return mixer.context.createBuffer(1, 44100 * 60, 44100);
       };
 
-      const engine = new AutoMixEngine({ mixer, bufferLoader });
-      engine.setPlaylist([t1]);
+      const engine = new AutoMixEngine({
+        mixer,
+        bufferLoader,
+        settings: { mixBars: 8, transitionStyle: 'bassSwap' },
+      });
+      engine.setPlaylist([t1, t2]);
 
       await engine.play();
-      expect(engine.isPlaying).toBe(true);
 
+      // Pre-decode next track
+      await engine.tick();
+
+      // Advance into active transition (started at 40.0s, duration 16.0s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 39.2;
+      await engine.tick();
+      expect(engine.inTransition).toBe(true);
+
+      // Advance into transition duration (audio time 45.0s, 5s into 16s transition, remaining ~11s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 45.0;
+
+      // Pause mid-transition
       engine.pause();
       expect(engine.isPlaying).toBe(false);
-      expect(engine.activeDeck.state).toBe('paused');
 
+      // Simulate being paused for 20 seconds (longer than remaining transition duration)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 65.0;
+
+      // Resume playback
       await engine.play();
       expect(engine.isPlaying).toBe(true);
-      expect(engine.activeDeck.state).toBe('playing');
+      // F4 fix: transition must NOT prematurely terminate immediately upon resume!
+      expect(engine.inTransition).toBe(true);
+
+      // Advance by the remaining transition duration (~11s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 76.5;
+      await engine.tick();
+
+      // Now the transition completes cleanly
+      expect(engine.inTransition).toBe(false);
+      expect(engine.getCurrentTrack()?.id).toBe('t-pause-2');
 
       engine.destroy();
     });
 
-    it('handles decode failure on next track by skipping it gracefully', async () => {
-      const mixer = new TwoDeckMixer();
-      const tGood1 = createTestTrack('t-good-1', 120, 10);
-      const tCorrupt = createTestTrack('t-corrupt', 120, 10);
-      const tGood2 = createTestTrack('t-good-2', 120, 10);
+    it('handles edge case: decode failure on next track by removing it from queue', async () => {
+      const ctx = new AudioContext();
+      const mixer = new TwoDeckMixer(ctx);
+      const tGood1 = createTestTrack('t-good-1', 120, 60);
+      const tCorrupt = createTestTrack('t-corrupt', 120, 60);
+      const tGood2 = createTestTrack('t-good-2', 120, 60);
 
       const bufferLoader = async (track: Track): Promise<AudioBuffer> => {
         if (track.id === 't-corrupt') {
           throw new Error('Corrupted audio stream');
         }
-        return mixer.context.createBuffer(1, 44100 * 10, 44100);
+        return mixer.context.createBuffer(1, 44100 * 60, 44100);
       };
 
       const engine = new AutoMixEngine({ mixer, bufferLoader });
       const errors: string[] = [];
       engine.subscribe((e) => {
-        if (e.type === 'track_error') errors.push(e.error ?? '');
+        if (e.type === 'track_error') errors.push(e.trackId ?? '');
       });
 
       engine.setPlaylist([tGood1, tCorrupt, tGood2]);
       await engine.play();
 
-      // Trigger skip which moves past corrupt track
-      engine.skip();
-      expect(engine.getCurrentTrack()?.id).toBe('t-corrupt');
+      // First tick attempts to pre-decode tCorrupt and catches decode error
+      await engine.tick();
+      expect(errors).toContain('t-corrupt');
 
-      // Skip corrupt track to good2
-      engine.skip();
-      expect(engine.getCurrentTrack()?.id).toBe('t-good-2');
+      // tCorrupt was spliced out of playlist; next track is now t-good-2
+      expect(engine.getNextTrack()?.id).toBe('t-good-2');
+      expect(engine.getCurrentTrack()?.id).toBe('t-good-1');
+
+      // Next tick pre-decodes t-good-2 successfully
+      await engine.tick();
+      expect(engine.incomingDeck.trackId).toBe('t-good-2');
+
+      engine.destroy();
+    });
+
+    it('handles edge case: last track fades out smoothly before stopping', async () => {
+      const ctx = new AudioContext();
+      const mixer = new TwoDeckMixer(ctx);
+      const tSingle = createTestTrack('t-single', 120, 60);
+
+      const bufferLoader = async (): Promise<AudioBuffer> => {
+        return mixer.context.createBuffer(1, 44100 * 60, 44100);
+      };
+
+      const engine = new AutoMixEngine({ mixer, bufferLoader });
+      engine.setPlaylist([tSingle]);
+
+      await engine.play();
+      expect(engine.isPlaying).toBe(true);
+
+      // Advance to 58.5s (duration is 60s, remaining 1.5s triggers fade out)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 58.5;
+      await engine.tick();
+
+      // Advance to end of track (60.05s)
+      (mixer.context as unknown as { currentTime: number }).currentTime = 60.05;
+      await engine.tick();
+      expect(engine.isPlaying).toBe(false);
 
       engine.destroy();
     });

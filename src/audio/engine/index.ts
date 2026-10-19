@@ -200,7 +200,7 @@ export class Deck {
    */
   public getCurrentTime(): number {
     if (this.playbackState === 'playing') {
-      const elapsed = (this.ctx.currentTime - this.startedAtAudioTime) * this.playbackRate;
+      const elapsed = Math.max(0, this.ctx.currentTime - this.startedAtAudioTime) * this.playbackRate;
       return Math.min(this.duration, this.pausedOffsetSec + elapsed);
     }
     return this.pausedOffsetSec;
@@ -390,15 +390,28 @@ export class TwoDeckMixer {
     startAudioTime: number,
     durationSec = 4.0
   ): void {
-    const dur = Math.max(0.1, durationSec);
+    this.schedulePartialCrossfade(fromDeck, startAudioTime, durationSec, 0);
+  }
+
+  /**
+   * Schedules the remaining portion of an equal-power crossfade ahead on the audio clock starting at startAudioTime.
+   */
+  public schedulePartialCrossfade(
+    fromDeck: DeckId,
+    startAudioTime: number,
+    totalDurationSec: number,
+    elapsedSec: number
+  ): void {
+    const remainingDuration = Math.max(0.01, totalDurationSec - elapsedSec);
     const steps = 64;
-    const stepDuration = dur / steps;
+    const stepDuration = remainingDuration / steps;
 
     this.deckA.deckGain.gain.cancelScheduledValues(startAudioTime);
     this.deckB.deckGain.gain.cancelScheduledValues(startAudioTime);
 
     for (let i = 0; i <= steps; i++) {
-      const progress = i / steps;
+      const currentElapsed = elapsedSec + (i / steps) * remainingDuration;
+      const progress = Math.min(1, Math.max(0, currentElapsed / totalDurationSec));
       const t = fromDeck === 'A' ? progress : 1 - progress;
       const { gainA, gainB } = equalPowerGains(t);
       const targetTime = startAudioTime + i * stepDuration;

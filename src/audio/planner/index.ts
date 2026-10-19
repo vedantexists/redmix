@@ -111,7 +111,7 @@ export function orderPlaylist(tracks: Track[], settings: Settings): Track[] {
 export function planTransition(
   a: TrackAnalysis,
   b: TrackAnalysis,
-  settings: Settings
+  settings: Partial<Settings> = {}
 ): TransitionPlan {
   const bpmA = a.bpm;
   const bpmB = b.bpm;
