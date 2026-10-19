@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Playlist, Settings, Track } from '@/shared/types';
+import type { Playlist, Settings, Track, TrackAnalysis } from '@/shared/types';
 import { db } from '@/library/db';
 
 interface AppState {
@@ -9,6 +9,7 @@ interface AppState {
   settings: Settings;
   loadTracksFromDb: () => Promise<void>;
   addTracks: (newTracks: Track[]) => void;
+  updateTrackAnalysis: (trackId: string, analysis: TrackAnalysis) => void;
   removeTrack: (id: string) => Promise<void>;
   setSettings: (settings: Partial<Settings>) => void;
 }
@@ -43,6 +44,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         updated[t.id] = t;
       }
       return { tracks: updated };
+    });
+  },
+  updateTrackAnalysis: (trackId, analysis) => {
+    set((state) => {
+      const track = state.tracks[trackId];
+      if (!track) return state;
+      return {
+        tracks: {
+          ...state.tracks,
+          [trackId]: { ...track, analysis },
+        },
+      };
     });
   },
   removeTrack: async (id) => {

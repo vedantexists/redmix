@@ -8,9 +8,11 @@ import {
 import { importAudioFiles, type ImportFailure } from '@/library/importer';
 import type { Track } from '@/shared/types';
 import { getTwoDeckMixer } from '@/audio/engine';
+import { analysisManager, type AnalysisState } from '@/analysis';
+import { decodeTrackForAnalysis } from '@/library/audioDecoder';
 
 export const LibraryScreen: React.FC = () => {
-  const { tracks, addTracks, removeTrack } = useAppStore();
+  const { tracks, addTracks, removeTrack, updateTrackAnalysis } = useAppStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fallbackInputRef = useRef<HTMLInputElement>(null);
 
@@ -20,6 +22,13 @@ export const LibraryScreen: React.FC = () => {
   );
   const [importErrors, setImportErrors] = useState<ImportFailure[]>([]);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [analysisStates, setAnalysisStates] = useState<Record<string, AnalysisState>>({});
+
+  useEffect(() => {
+    return analysisManager.subscribe((trackId, state) => {
+      setAnalysisStates((prev) => ({ ...prev, [trackId]: state }));
+    });
+  }, []);
 
   const trackList = Object.values(tracks);
 
@@ -108,6 +117,27 @@ export const LibraryScreen: React.FC = () => {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const handleAnalyzeTrack = async (track: Track) => {
+    try {
+      const analysis = await analysisManager.analyzeTrack(track, () => decodeTrackForAnalysis(track));
+      updateTrackAnalysis(track.id, analysis);
+    } catch {
+      // Error is stored in analysisStates
+    }
+  };
+
+  const handleAnalyzeAll = () => {
+    for (const t of trackList) {
+      if (!t.analysis) {
+        void handleAnalyzeTrack(t);
+      }
+    }
+  };
+
+  const handleCancelAnalysis = (trackId: string) => {
+    analysisManager.cancel(trackId);
+  };
+
   return (
     <div data-testid="screen-library" className="p-4 space-y-4">
       {/* Header & Controls */}
@@ -120,6 +150,18 @@ export const LibraryScreen: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Analyze All Button */}
+          {trackList.length > 0 && (
+            <button
+              data-testid="btn-analyze-all"
+              onClick={handleAnalyzeAll}
+              className="px-3 py-2 bg-violet-600 hover:bg-violet-500 text-white text-xs rounded-xl font-medium shadow-md shadow-violet-600/20 active:scale-95 flex items-center gap-1.5 transition-all"
+            >
+              <span>⚡</span>
+              <span>Analyze All</span>
+            </button>
+          )}
+
           {/* Primary Import Button */}
           <button
             data-testid="btn-import-primary"
@@ -246,8 +288,11 @@ export const LibraryScreen: React.FC = () => {
             <TrackItem
               key={track.id}
               track={track}
+              analysisState={analysisStates[track.id]}
               formatSize={formatFileSize}
               onRemove={() => removeTrack(track.id)}
+              onAnalyze={() => void handleAnalyzeTrack(track)}
+              onCancelAnalysis={() => handleCancelAnalysis(track.id)}
             />
           ))}
         </div>
@@ -258,9 +303,16 @@ export const LibraryScreen: React.FC = () => {
 
 const TrackItem: React.FC<{
   track: Track;
+  analysisState?: AnalysisState;
   formatSize: (bytes: number) => string;
   onRemove: () => void;
-}> = ({ track, formatSize, onRemove }) => {
+  onAnalyze: () => void;
+  onCancelAnalysis: () => void;
+}> = ({ track, analysisState, formatSize, onRemove, onAnalyze, onCancelAnalysis }) => {
+  const analysis = track.analysis;
+  const status = analysisState?.status || (analysis ? 'done' : 'idle');
+  const progress = analysisState?.progress ?? 0;
+
   return (
     <div
       data-testid={`track-item-${track.id}`}
@@ -282,6 +334,82 @@ const TrackItem: React.FC<{
       </div>
 
       <div className="flex items-center gap-2 flex-shrink-0">
+        {/* BPM & Key Badges if analyzed */}
+        {analysis && (
+          <div className="flex items-center gap-1.5">
+            <span
+              data-testid={`badge-bpm-${track.id}`}
+              className="px-2 py-0.5 bg-violet-500/15 text-violet-300 border border-violet-500/30 rounded text-[10px] font-mono font-semibold"
+            >
+              {Math.round(analysis.bpm)} BPM
+            </span>
+            <span
+              data-testid={`badge-key-${track.id}`}
+              className="px-2 py-0.5 bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 rounded text-[10px] font-mono font-semibold"
+            >
+              {analysis.key.camelot}
+            </span>
+          </div>
+        )}
+
+        {/* Dynamic Analysis Status */}
+        {!analysis && status === 'analyzing' && (
+          <div className="flex items-center gap-1.5">
+            <span
+              data-testid={`status-analyzing-${track.id}`}
+              className="text-[10px] text-indigo-400 font-mono animate-pulse"
+            >
+              Analyzing {Math.round(progress * 100)}%
+            </span>
+            <button
+              data-testid={`btn-cancel-analysis-${track.id}`}
+              onClick={onCancelAnalysis}
+              className="text-gray-400 hover:text-rose-400 text-xs px-1"
+              title="Cancel analysis"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {!analysis && status === 'queued' && (
+          <span
+            data-testid={`status-queued-${track.id}`}
+            className="text-[10px] text-gray-400 font-mono bg-gray-800/80 px-2 py-0.5 rounded border border-gray-700/50"
+          >
+            Queued
+          </span>
+        )}
+
+        {!analysis && status === 'failed' && (
+          <div className="flex items-center gap-1.5">
+            <span
+              data-testid={`status-failed-${track.id}`}
+              className="text-[10px] text-rose-400 font-mono bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20"
+            >
+              Failed
+            </span>
+            <button
+              data-testid={`btn-retry-analysis-${track.id}`}
+              onClick={onAnalyze}
+              className="text-gray-400 hover:text-amber-400 text-xs"
+              title="Retry analysis"
+            >
+              ↺
+            </button>
+          </div>
+        )}
+
+        {!analysis && (status === 'idle' || status === 'cancelled') && (
+          <button
+            data-testid={`btn-analyze-${track.id}`}
+            onClick={onAnalyze}
+            className="px-2 py-0.5 rounded text-[10px] font-medium bg-gray-800 hover:bg-gray-700 text-gray-300 border border-gray-700/60 transition-colors"
+          >
+            Analyze
+          </button>
+        )}
+
         {/* Source badge */}
         <span
           className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
