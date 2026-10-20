@@ -157,7 +157,23 @@ export function planTransition(
     }
   }
 
-  // 3. Fallback on tempo gap
+  // 3. Explicit simpleCrossfade or fallback on tempo gap
+  if (settings.transitionStyle === 'simpleCrossfade') {
+    const durSec = Math.min(8.0, Math.max(2.0, a.durationSec * 0.25, b.durationSec * 0.25));
+    const outStart = a.outroStartSec > 0 && a.outroStartSec <= a.durationSec - durSec
+      ? a.outroStartSec
+      : Math.max(0, a.durationSec - durSec);
+    return {
+      outgoingStartSec: Math.round(outStart * 1000) / 1000,
+      incomingStartSec: Math.round(b.firstBeatSec * 1000) / 1000,
+      durationBars: Math.max(1, Math.round(durSec / barSecA)),
+      durationSec: Math.round(durSec * 1000) / 1000,
+      incomingRate: 1.0,
+      rateRamp: 'toNeutral',
+      style: 'simpleCrossfade',
+    };
+  }
+
   if (!stretchOk) {
     const durSec = Math.min(8.0, Math.max(2.0, a.durationSec * 0.25, b.durationSec * 0.25));
     const outStart = Math.max(0, a.durationSec - durSec);
@@ -173,8 +189,15 @@ export function planTransition(
     };
   }
 
-  // 4. Mix duration in bars
+  // 4. Mix duration in bars (respects settings or adapts to incoming intro)
   let durationBars: number = settings.mixBars ?? 16;
+  if (!settings.mixBars && b.introEndSec > b.firstBeatSec) {
+    const introBarsB = Math.round((b.introEndSec - b.firstBeatSec) / barSecB);
+    if (introBarsB >= 4 && introBarsB <= 32) {
+      durationBars = introBarsB;
+    }
+  }
+
   const maxBarsA = Math.floor(Math.max(0, a.durationSec - a.firstBeatSec) / barSecA);
   const maxBarsB = Math.floor(Math.max(0, b.durationSec - b.firstBeatSec) / barSecB);
   const maxPossibleBars = Math.max(1, Math.min(maxBarsA, maxBarsB));

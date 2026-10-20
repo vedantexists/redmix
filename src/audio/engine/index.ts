@@ -297,6 +297,32 @@ export class Deck {
   }
 
   /**
+   * Sets low-filter cutoff frequency (Hz) with scheduled linear ramp.
+   * 10 Hz = neutral pass-through (bass stays).
+   * 200 Hz = low band cut (highpass cuts bass).
+   */
+  public setFilterCutoff(freqHz: number, rampDurationSec = 0.02, startTime?: number): void {
+    const clampedFreq = Math.max(10, Math.min(20000, freqHz));
+    const now = startTime ?? this.ctx.currentTime;
+    this.lowFilter.frequency.cancelScheduledValues(now);
+    this.lowFilter.frequency.setValueAtTime(this.lowFilter.frequency.value, now);
+    this.lowFilter.frequency.linearRampToValueAtTime(clampedFreq, now + Math.max(0.005, rampDurationSec));
+  }
+
+  /**
+   * Resets low-filter cutoff to neutral pass-through (10 Hz).
+   */
+  public resetFilter(): void {
+    const now = this.ctx.currentTime;
+    this.lowFilter.frequency.cancelScheduledValues(now);
+    this.lowFilter.frequency.setValueAtTime(10, now);
+  }
+
+  public get filterCutoff(): number {
+    return this.lowFilter.frequency.value;
+  }
+
+  /**
    * Releases loaded buffer to enforce memory limit (max 2 decoded buffers).
    */
   public unloadBuffer(): void {
@@ -419,6 +445,73 @@ export class TwoDeckMixer {
       this.deckA.deckGain.gain.linearRampToValueAtTime(gainA, targetTime);
       this.deckB.deckGain.gain.linearRampToValueAtTime(gainB, targetTime);
     }
+  }
+
+  /**
+   * Schedules a low-band bass swap using BiquadFilterNodes (highpass at ~200 Hz).
+   * From startAudioTime to midpoint:
+   *   - fromDeck: lowFilter = 10 Hz (bass stays)
+   *   - toDeck: lowFilter = 200 Hz (bass cut)
+   * At midpoint bar boundary (over ~1 beat):
+   *   - fromDeck ramps 10 Hz -> 200 Hz (bass cut)
+   *   - toDeck ramps 200 Hz -> 10 Hz (bass restored)
+   * From midpoint + 1 beat to end:
+   *   - fromDeck: 200 Hz (bass cut)
+   *   - toDeck: 10 Hz (full bass)
+   */
+  public scheduleBassSwap(
+    fromDeckId: DeckId,
+    startAudioTime: number,
+    durationSec: number,
+    beatDurationSec = 0.5
+  ): void {
+    this.schedulePartialBassSwap(fromDeckId, startAudioTime, durationSec, 0, beatDurationSec);
+  }
+
+  /**
+   * Schedules the remaining portion of a bass swap from elapsedSec.
+   */
+  public schedulePartialBassSwap(
+    fromDeckId: DeckId,
+    startAudioTime: number,
+    totalDurationSec: number,
+    elapsedSec: number,
+    beatDurationSec = 0.5
+  ): void {
+    const fromDeck = fromDeckId === 'A' ? this.deckA : this.deckB;
+    const toDeck = fromDeckId === 'A' ? this.deckB : this.deckA;
+
+    const midpointElapsed = totalDurationSec / 2;
+    const swapRampSec = Math.min(totalDurationSec * 0.25, Math.max(0.05, beatDurationSec));
+
+    fromDeck.lowFilter.frequency.cancelScheduledValues(startAudioTime);
+    toDeck.lowFilter.frequency.cancelScheduledValues(startAudioTime);
+
+    if (elapsedSec < midpointElapsed) {
+      const timeToMidpoint = midpointElapsed - elapsedSec;
+      const midpointAudioTime = startAudioTime + timeToMidpoint;
+
+      fromDeck.lowFilter.frequency.setValueAtTime(10, startAudioTime);
+      toDeck.lowFilter.frequency.setValueAtTime(200, startAudioTime);
+
+      fromDeck.lowFilter.frequency.setValueAtTime(10, midpointAudioTime);
+      toDeck.lowFilter.frequency.setValueAtTime(200, midpointAudioTime);
+
+      fromDeck.lowFilter.frequency.linearRampToValueAtTime(200, midpointAudioTime + swapRampSec);
+      toDeck.lowFilter.frequency.linearRampToValueAtTime(10, midpointAudioTime + swapRampSec);
+    } else {
+      // Swap already completed before pause
+      fromDeck.lowFilter.frequency.setValueAtTime(200, startAudioTime);
+      toDeck.lowFilter.frequency.setValueAtTime(10, startAudioTime);
+    }
+  }
+
+  /**
+   * Resets both deck filters to neutral pass-through (10 Hz).
+   */
+  public resetFilters(): void {
+    this.deckA.resetFilter();
+    this.deckB.resetFilter();
   }
 
   /**

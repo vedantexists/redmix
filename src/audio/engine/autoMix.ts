@@ -159,6 +159,18 @@ export class AutoMixEngine {
             elapsed
           );
 
+          if (plan.style === 'bassSwap') {
+            const current = this.getCurrentTrack();
+            const beatDurationSec = current?.analysis ? 60 / current.analysis.bpm : 0.5;
+            this.mixer.schedulePartialBassSwap(
+              this.activeDeckId,
+              resumeAudioTime,
+              total,
+              elapsed,
+              beatDurationSec
+            );
+          }
+
           this.transitionEndTime = resumeAudioTime + remaining;
           this.transitionRemainingSec = null;
           this.transitionElapsedSec = null;
@@ -205,6 +217,7 @@ export class AutoMixEngine {
     this.mixer.deckB.stop();
     this.mixer.deckA.unloadBuffer();
     this.mixer.deckB.unloadBuffer();
+    this.mixer.resetFilters();
 
     this.emit({ type: 'state_changed', isPlaying: false });
   }
@@ -218,6 +231,7 @@ export class AutoMixEngine {
       active.stop();
       active.unloadBuffer();
       incoming.setGain(1.0, 0.05);
+      this.mixer.resetFilters();
 
       this.activeDeckId = this.activeDeckId === 'A' ? 'B' : 'A';
       this.currentIndex++;
@@ -409,6 +423,21 @@ export class AutoMixEngine {
     // 4. Equal-power crossfade curve scheduled on audio clock
     this.mixer.scheduleCrossfade(this.activeDeckId, startAudioTime, plan.durationSec);
 
+    // 5. Bass swap (if style is bassSwap)
+    if (plan.style === 'bassSwap') {
+      const beatDurationSec = currentTrack.analysis
+        ? 60 / currentTrack.analysis.bpm
+        : 0.5;
+      this.mixer.scheduleBassSwap(
+        this.activeDeckId,
+        startAudioTime,
+        plan.durationSec,
+        beatDurationSec
+      );
+    } else {
+      this.mixer.resetFilters();
+    }
+
     this.isTransitioning = true;
     this.transitionEndTime = startAudioTime + plan.durationSec;
     this.emit({ type: 'transition_started', plan });
@@ -420,6 +449,7 @@ export class AutoMixEngine {
     // Stop and UNLOAD previous track buffer (enforce memory limit: max 2 tracks)
     active.stop();
     active.unloadBuffer();
+    this.mixer.resetFilters();
 
     // Promote incoming deck to active deck
     this.activeDeckId = this.activeDeckId === 'A' ? 'B' : 'A';
