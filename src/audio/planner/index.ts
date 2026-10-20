@@ -47,7 +47,10 @@ export function camelotCompatible(k1: string, k2: string): boolean {
  * Orders tracks into a continuous harmonic playlist.
  * Deterministic, non-mutating, handles 0, 1, 2 tracks.
  */
-export function orderPlaylist(tracks: Track[], settings: Settings): Track[] {
+export function orderPlaylist(
+  tracks: Track[],
+  settings: Partial<Settings> = { keyAwareOrdering: true }
+): Track[] {
   if (!tracks || tracks.length <= 2) {
     return tracks ? [...tracks] : [];
   }
