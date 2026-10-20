@@ -24,6 +24,8 @@ export interface AppState {
   loadTracksFromDb: () => Promise<void>;
   addTracks: (newTracks: Track[]) => void;
   updateTrackAnalysis: (trackId: string, analysis: TrackAnalysis) => void;
+  updateTrackOverrides: (trackId: string, overrides: { bpm?: number; firstBeatSec?: number }) => Promise<void>;
+  resetTrackOverrides: (trackId: string) => Promise<void>;
   removeTrack: (id: string) => Promise<void>;
   setSettings: (settings: Partial<Settings>) => void;
 
@@ -98,13 +100,56 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const track = state.tracks[trackId];
       if (!track) return state;
+      const updatedTrack = { ...track, analysis };
+      void db.saveTrack(updatedTrack);
       return {
         tracks: {
           ...state.tracks,
-          [trackId]: { ...track, analysis },
+          [trackId]: updatedTrack,
         },
       };
     });
+  },
+
+  updateTrackOverrides: async (trackId, overrides) => {
+    const track = get().tracks[trackId];
+    if (!track || !track.analysis) return;
+    const updatedTrack: Track = {
+      ...track,
+      analysis: {
+        ...track.analysis,
+        userOverrides: {
+          ...track.analysis.userOverrides,
+          ...overrides,
+        },
+      },
+    };
+    set((state) => ({
+      tracks: {
+        ...state.tracks,
+        [trackId]: updatedTrack,
+      },
+    }));
+    await db.saveTrack(updatedTrack);
+  },
+
+  resetTrackOverrides: async (trackId) => {
+    const track = get().tracks[trackId];
+    if (!track || !track.analysis) return;
+    const { userOverrides: _, ...restAnalysis } = track.analysis;
+    const updatedTrack: Track = {
+      ...track,
+      analysis: {
+        ...restAnalysis,
+      },
+    };
+    set((state) => ({
+      tracks: {
+        ...state.tracks,
+        [trackId]: updatedTrack,
+      },
+    }));
+    await db.saveTrack(updatedTrack);
   },
 
   removeTrack: async (id) => {

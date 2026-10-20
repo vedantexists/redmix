@@ -899,12 +899,7 @@ export const NowMixingScreen: React.FC = () => {
   );
 };
 
-export const TrackEditorScreen: React.FC = () => (
-  <div data-testid="screen-track-editor" className="p-4">
-    <h2 className="text-xl font-bold text-white mb-2">Track Editor</h2>
-    <p className="text-gray-400 text-sm">Fine-tune beat grid, BPM, and cue points.</p>
-  </div>
-);
+export { TrackEditorScreen } from './TrackEditorScreen';
 
 export const SettingsScreen: React.FC = () => (
   <div data-testid="screen-settings" className="p-4">

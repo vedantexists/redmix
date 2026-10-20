@@ -44,6 +44,20 @@ export function camelotCompatible(k1: string, k2: string): boolean {
 }
 
 /**
+ * Returns effective BPM respecting user overrides if defined.
+ */
+export function getEffectiveBpm(analysis: TrackAnalysis): number {
+  return analysis.userOverrides?.bpm ?? analysis.bpm;
+}
+
+/**
+ * Returns effective firstBeatSec respecting user overrides if defined.
+ */
+export function getEffectiveFirstBeatSec(analysis: TrackAnalysis): number {
+  return analysis.userOverrides?.firstBeatSec ?? analysis.firstBeatSec;
+}
+
+/**
  * Orders tracks into a continuous harmonic playlist.
  * Deterministic, non-mutating, handles 0, 1, 2 tracks.
  */
@@ -57,10 +71,10 @@ export function orderPlaylist(
 
   const pool = [...tracks];
 
-  // Deterministic starting track: sort by ID or title first, pick lowest BPM
+  // Deterministic starting track: sort by ID or title first, pick lowest effective BPM
   pool.sort((a, b) => {
-    const bpmA = a.analysis?.bpm ?? 120;
-    const bpmB = b.analysis?.bpm ?? 120;
+    const bpmA = a.analysis ? getEffectiveBpm(a.analysis) : 120;
+    const bpmB = b.analysis ? getEffectiveBpm(b.analysis) : 120;
     if (bpmA !== bpmB) return bpmA - bpmB;
     return a.id.localeCompare(b.id);
   });
@@ -69,7 +83,7 @@ export function orderPlaylist(
 
   while (pool.length > 0) {
     const prev = ordered[ordered.length - 1]!;
-    const prevBpm = prev.analysis?.bpm ?? 120;
+    const prevBpm = prev.analysis ? getEffectiveBpm(prev.analysis) : 120;
     const prevKey = prev.analysis?.key?.camelot ?? '';
 
     let bestIdx = 0;
@@ -77,7 +91,7 @@ export function orderPlaylist(
 
     for (let i = 0; i < pool.length; i++) {
       const candidate = pool[i]!;
-      const candBpm = candidate.analysis?.bpm ?? 120;
+      const candBpm = candidate.analysis ? getEffectiveBpm(candidate.analysis) : 120;
       const candKey = candidate.analysis?.key?.camelot ?? '';
 
       // Score: lower is better
@@ -110,14 +124,17 @@ export function orderPlaylist(
 /**
  * Plans transition between outgoing track A and incoming track B.
  * Pure logic: bar alignment, tempo matching, fallback detection.
+ * Respects userOverrides in preference to raw analysis values.
  */
 export function planTransition(
   a: TrackAnalysis,
   b: TrackAnalysis,
   settings: Partial<Settings> = {}
 ): TransitionPlan {
-  const bpmA = a.bpm;
-  const bpmB = b.bpm;
+  const bpmA = getEffectiveBpm(a);
+  const bpmB = getEffectiveBpm(b);
+  const firstBeatA = getEffectiveFirstBeatSec(a);
+  const firstBeatB = getEffectiveFirstBeatSec(b);
   const barSecA = 4 * (60 / bpmA);
   const barSecB = 4 * (60 / bpmB);
 
@@ -168,7 +185,7 @@ export function planTransition(
       : Math.max(0, a.durationSec - durSec);
     return {
       outgoingStartSec: Math.round(outStart * 1000) / 1000,
-      incomingStartSec: Math.round(b.firstBeatSec * 1000) / 1000,
+      incomingStartSec: Math.round(firstBeatB * 1000) / 1000,
       durationBars: Math.max(1, Math.round(durSec / barSecA)),
       durationSec: Math.round(durSec * 1000) / 1000,
       incomingRate: 1.0,
@@ -194,15 +211,15 @@ export function planTransition(
 
   // 4. Mix duration in bars (respects settings or adapts to incoming intro)
   let durationBars: number = settings.mixBars ?? 16;
-  if (!settings.mixBars && b.introEndSec > b.firstBeatSec) {
-    const introBarsB = Math.round((b.introEndSec - b.firstBeatSec) / barSecB);
+  if (!settings.mixBars && b.introEndSec > firstBeatB) {
+    const introBarsB = Math.round((b.introEndSec - firstBeatB) / barSecB);
     if (introBarsB >= 4 && introBarsB <= 32) {
       durationBars = introBarsB;
     }
   }
 
-  const maxBarsA = Math.floor(Math.max(0, a.durationSec - a.firstBeatSec) / barSecA);
-  const maxBarsB = Math.floor(Math.max(0, b.durationSec - b.firstBeatSec) / barSecB);
+  const maxBarsA = Math.floor(Math.max(0, a.durationSec - firstBeatA) / barSecA);
+  const maxBarsB = Math.floor(Math.max(0, b.durationSec - firstBeatB) / barSecB);
   const maxPossibleBars = Math.max(1, Math.min(maxBarsA, maxBarsB));
 
   if (durationBars > maxPossibleBars) {
@@ -212,8 +229,7 @@ export function planTransition(
   let durationSec = durationBars * barSecA;
 
   // 5. outgoingStartSec: aligned to track A's bar grid
-  // Grid line for bar k: t_k = firstBeatSec + k * barSecA
-  const firstBeatA = a.firstBeatSec;
+  // Grid line for bar k: t_k = firstBeatA + k * barSecA
   const latestPossibleStart = Math.max(0, a.durationSec - durationSec);
 
   // Target start: outroStartSec if valid, else latestPossibleStart
@@ -243,7 +259,7 @@ export function planTransition(
   const outgoingStartSec = Math.max(0, Math.round(snapStart * 1000) / 1000);
 
   // 6. incomingStartSec: start B at its first bar
-  const incomingStartSec = Math.max(0, Math.round(b.firstBeatSec * 1000) / 1000);
+  const incomingStartSec = Math.max(0, Math.round(firstBeatB * 1000) / 1000);
 
   return {
     outgoingStartSec,
