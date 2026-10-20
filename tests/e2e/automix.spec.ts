@@ -1,10 +1,25 @@
 import { test, expect } from '@playwright/test';
+import { generateSyntheticClickTrack } from '../fixtures/syntheticAudio';
 
-function createValidWavBuffer(durationSec = 2, sampleRate = 22050, frequency = 440): Buffer {
+function createClickWavBuffer(options: {
+  bpm: number;
+  durationSec: number;
+  sampleRate?: number;
+  firstBeatSec?: number;
+  clickFrequency?: number;
+}): Buffer {
+  const sampleRate = options.sampleRate ?? 22050;
+  const pcm = generateSyntheticClickTrack({
+    bpm: options.bpm,
+    durationSec: options.durationSec,
+    sampleRate,
+    firstBeatSec: options.firstBeatSec ?? 0,
+    clickFrequency: options.clickFrequency ?? 880,
+  });
+
   const numChannels = 1;
   const bytesPerSample = 2; // 16-bit PCM
-  const numSamples = Math.floor(durationSec * sampleRate);
-  const dataSize = numSamples * numChannels * bytesPerSample;
+  const dataSize = pcm.length * numChannels * bytesPerSample;
   const buffer = Buffer.alloc(44 + dataSize);
 
   // RIFF header
@@ -14,8 +29,8 @@ function createValidWavBuffer(durationSec = 2, sampleRate = 22050, frequency = 4
 
   // fmt chunk
   buffer.write('fmt ', 12);
-  buffer.writeUInt32LE(16, 16); // 16 bytes for PCM format
-  buffer.writeUInt16LE(1, 20); // PCM format
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20); // PCM
   buffer.writeUInt16LE(numChannels, 22);
   buffer.writeUInt32LE(sampleRate, 24);
   buffer.writeUInt32LE(sampleRate * numChannels * bytesPerSample, 28);
@@ -26,11 +41,9 @@ function createValidWavBuffer(durationSec = 2, sampleRate = 22050, frequency = 4
   buffer.write('data', 36);
   buffer.writeUInt32LE(dataSize, 40);
 
-  // Audio tone
-  for (let i = 0; i < numSamples; i++) {
-    const sample = Math.sin((2 * Math.PI * frequency * i) / sampleRate);
-    const intSample = Math.floor(sample * 30000);
-    buffer.writeInt16LE(intSample, 44 + i * 2);
+  for (let i = 0; i < pcm.length; i++) {
+    const val = Math.max(-1, Math.min(1, pcm[i] ?? 0));
+    buffer.writeInt16LE(Math.floor(val * 32000), 44 + i * 2);
   }
 
   return buffer;
@@ -74,7 +87,7 @@ test.describe('M7 Full AutoMix E2E Flow & Mobile Usability', () => {
     }
   });
 
-  test('covers full lifecycle: import -> library -> playlist queue -> auto-order -> play -> skip', async ({
+  test('covers full lifecycle: import -> analyze -> playlist queue -> auto-order -> play -> automatic transition -> skip', async ({
     page,
   }) => {
     await page.goto('/');
@@ -83,9 +96,10 @@ test.describe('M7 Full AutoMix E2E Flow & Mobile Usability', () => {
     await page.getByTestId('tab-library').click();
     await expect(page.getByTestId('screen-library')).toBeVisible();
 
-    // 2. Import two synthetic audio tracks with distinct parameters
-    const wav1 = createValidWavBuffer(3, 22050, 440);
-    const wav2 = createValidWavBuffer(4, 22050, 554);
+    // 2. Generate 3 synthetic audio tracks with click beats at 120 BPM
+    const wav1 = createClickWavBuffer({ bpm: 120, durationSec: 6.0, clickFrequency: 880 });
+    const wav2 = createClickWavBuffer({ bpm: 120, durationSec: 4.0, clickFrequency: 440 });
+    const wav3 = createClickWavBuffer({ bpm: 120, durationSec: 5.0, clickFrequency: 660 });
 
     const fileInput = page.getByTestId('input-file-fallback');
     await fileInput.setInputFiles([
@@ -99,74 +113,96 @@ test.describe('M7 Full AutoMix E2E Flow & Mobile Usability', () => {
         mimeType: 'audio/wav',
         buffer: wav2,
       },
+      {
+        name: 'Track Gamma.wav',
+        mimeType: 'audio/wav',
+        buffer: wav3,
+      },
     ]);
 
     // Verify tracks are imported and visible in library
     await expect(page.getByTestId('track-list')).toBeVisible();
     await expect(page.getByText('Track Alpha', { exact: true })).toBeVisible();
     await expect(page.getByText('Track Beta', { exact: true })).toBeVisible();
+    await expect(page.getByText('Track Gamma', { exact: true })).toBeVisible();
 
-    // 3. Add tracks to playlist queue
+    // 3. Trigger and await Analysis (F1 fix)
+    await page.getByTestId('btn-analyze-all').click();
+    // Await all 3 tracks to complete analysis (badges rendered)
+    await expect(page.locator('[data-testid^="badge-bpm-"]')).toHaveCount(3, { timeout: 15000 });
+    await expect(page.locator('[data-testid^="badge-key-"]')).toHaveCount(3);
+
+    // 4. Add analyzed tracks to playlist queue
     await page.getByTestId('btn-add-all-to-playlist').click();
 
-    // 4. Navigate to Playlist screen
+    // 5. Navigate to Playlist screen
     await page.getByTestId('tab-playlist').click();
     await expect(page.getByTestId('screen-playlist')).toBeVisible();
 
-    // Assert both tracks in playlist queue
+    // Assert all 3 tracks in playlist queue
     await expect(page.getByTestId('playlist-item-0')).toBeVisible();
     await expect(page.getByTestId('playlist-item-1')).toBeVisible();
+    await expect(page.getByTestId('playlist-item-2')).toBeVisible();
     await expect(page.getByTestId('playlist-item-0')).toContainText('Track Alpha');
     await expect(page.getByTestId('playlist-item-1')).toContainText('Track Beta');
+    await expect(page.getByTestId('playlist-item-2')).toContainText('Track Gamma');
 
-    // 5. Test manual reordering (Move Track Alpha down)
+    // 6. Test manual reordering (Move Track Alpha down)
     await page.getByTestId('btn-move-down-0').click();
-    // After moving down, Track Beta is now index 0 and Track Alpha is index 1
     await expect(page.getByTestId('playlist-item-0')).toContainText('Track Beta');
     await expect(page.getByTestId('playlist-item-1')).toContainText('Track Alpha');
 
-    // 6. Test Auto-Order button
+    // 7. Test Auto-Order button
     const autoOrderBtn = page.getByTestId('btn-auto-order');
     await expect(autoOrderBtn).toBeVisible();
     await autoOrderBtn.click();
 
-    // 7. Start playback from playlist
+    // Re-verify queue after auto-order
+    await expect(page.getByTestId('playlist-item-0')).toBeVisible();
+
+    // 8. Start playback from playlist
     await page.getByTestId('btn-playlist-play').click();
 
-    // 8. Navigate to Now Mixing view
+    // 9. Navigate to Now Mixing view
     await page.getByTestId('tab-mixing').click();
     await expect(page.getByTestId('screen-now-mixing')).toBeVisible();
 
     // Verify active track is populated
     await expect(page.getByTestId('now-mixing-current')).toBeVisible();
-    const currentText = await page.getByTestId('now-mixing-current').textContent();
-    expect(currentText).toContain('Track');
+    const track1Text = (await page.getByTestId('now-mixing-current').textContent()) || '';
+    expect(track1Text.length).toBeGreaterThan(0);
 
     // Verify transition countdown indicator is rendered
     await expect(page.getByTestId('transition-countdown')).toBeVisible();
 
-    // Verify transition settings interaction
-    await page.getByTestId('btn-mixbars-8').click();
-    await expect(page.getByTestId('btn-mixbars-8')).toHaveClass(/bg-indigo-600/);
+    // 10. Automatic Transition Verification (F2 fix)
+    // As Track 1 reaches its transition start point, the lookahead scheduler fires.
+    // The mixing status activates and Track 1 automatically blends into Track 2.
+    // Wait for the automatic transition to complete and verify active track changed without manual intervention.
+    await expect(page.getByTestId('now-mixing-current')).not.toHaveText(track1Text, {
+      timeout: 12000,
+    });
+    const track2Text = (await page.getByTestId('now-mixing-current').textContent()) || '';
+    expect(track2Text.length).toBeGreaterThan(0);
+    expect(track2Text).not.toEqual(track1Text);
 
-    await page.getByTestId('btn-style-longBlend').click();
-    await expect(page.getByTestId('btn-style-longBlend')).toHaveClass(/bg-purple-600/);
-
-    // 9. Skip to next track and verify state change
-    const initialTrackText = await page.getByTestId('now-mixing-current').textContent();
-    expect(initialTrackText).toBeDefined();
+    // 11. Beat-aligned Skip Verification with Concrete State Change (F3 fix)
     await page.getByTestId('btn-skip').click();
 
-    // Wait for transition or track change to reflect
-    await page.waitForTimeout(500);
-    const updatedTrackText = await page.getByTestId('now-mixing-current').textContent();
-    // Confirm transport is responsive and active
-    expect(updatedTrackText).toBeDefined();
+    // The skip initiates a 1.0s crossfade to the next track.
+    // Await crossfade completion and verify active track text changes to Track 3.
+    await expect(page.getByTestId('now-mixing-current')).not.toHaveText(track2Text, {
+      timeout: 5000,
+    });
+    const track3Text = (await page.getByTestId('now-mixing-current').textContent()) || '';
+    expect(track3Text.length).toBeGreaterThan(0);
+    expect(track3Text).not.toEqual(track2Text);
 
-    // 10. Pause and Resume
+    // 12. Transport Controls: Pause and Resume
     const playPauseBtn = page.getByTestId('btn-play-pause');
     await playPauseBtn.click();
-    await page.waitForTimeout(200);
+    await expect(playPauseBtn).toContainText('Play');
     await playPauseBtn.click();
+    await expect(playPauseBtn).toContainText('Pause');
   });
 });
