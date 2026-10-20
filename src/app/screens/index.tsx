@@ -901,11 +901,4 @@ export const NowMixingScreen: React.FC = () => {
 
 export { TrackEditorScreen } from './TrackEditorScreen';
 
-export const SettingsScreen: React.FC = () => (
-  <div data-testid="screen-settings" className="p-4">
-    <h2 className="text-xl font-bold text-white mb-2">Settings</h2>
-    <p className="text-gray-400 text-sm">
-      Configure mix duration, transition curves, and audio limits.
-    </p>
-  </div>
-);
+export { SettingsScreen } from './SettingsScreen';

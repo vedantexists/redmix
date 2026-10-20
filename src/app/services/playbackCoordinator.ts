@@ -1,6 +1,7 @@
 import { getAutoMixEngine, type AutoMixEngine, type AutoMixEvent } from '@/audio/engine';
 import { useAppStore } from '../store';
 import type { Track, Settings } from '@/shared/types';
+import { wakeLockManager } from './wakeLock';
 
 class PlaybackCoordinator {
   private engine: AutoMixEngine;
@@ -26,8 +27,10 @@ class PlaybackCoordinator {
         store.setPlaybackState({ isPlaying: event.isPlaying });
         if (event.isPlaying) {
           this.startSyncLoop();
+          void wakeLockManager.acquireLock();
         } else {
           this.stopSyncLoop();
+          wakeLockManager.releaseLock();
         }
         break;
 
@@ -184,6 +187,7 @@ class PlaybackCoordinator {
 
   public destroy(): void {
     this.stopSyncLoop();
+    wakeLockManager.releaseLock();
     this.unsubscribeEngine?.();
   }
 }
